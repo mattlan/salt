@@ -213,65 +213,83 @@ def _import_platform_generator(platform):
     log.error('Unable to identify any Capirca plaform class for {plat}'.format(plat=platform))
 
 
-def _get_services_mapping():
+def _get_services_mapping(pillarenv=None,
+                          saltenv=None):
     '''
-    Build a map of services based on the IANA assignment list:
-    http://www.iana.org/assignments/port-numbers
-
-    It will load the /etc/services file and will build the mapping on the fly,
-    similar to the Capirca's SERVICES file:
-    https://github.com/google/capirca/blob/master/def/SERVICES.svc
-
-    As this module is be available on Unix systems only,
-    we'll read the services from /etc/services.
-    In the worst case, the user will not be able to specify the
-    services shortcut and they will need to specify the protocol / port combination
-    using the source_port / destination_port & protocol fields.
+    Build map of services first checking for pillar key services
+    or falling back to using IANA assignments in /etc/services
     '''
     if _SERVICES:
         return _SERVICES
-    services_txt = ''
-    try:
-        with salt.utils.files.fopen('/etc/services', 'r') as srv_f:
-            services_txt = salt.utils.stringutils.to_unicode(srv_f.read())
-    except IOError as ioe:
-        log.error('Unable to read from /etc/services:')
-        log.error(ioe)
-        return _SERVICES  # no mapping possible, sorry
-        # will return the default mapping
-    service_rgx = re.compile(r'^([a-zA-Z0-9-]+)\s+(\d+)\/(tcp|udp)(.*)$')
-    for line in services_txt.splitlines():
-        service_rgx_s = service_rgx.search(line)
-        if service_rgx_s and len(service_rgx_s.groups()) == 4:
-            srv_name, port, protocol, _ = service_rgx_s.groups()
-            if srv_name not in _SERVICES:
-                _SERVICES[srv_name] = {
-                    'port': [],
-                    'protocol': []
-                }
-            try:
-                _SERVICES[srv_name]['port'].append(int(port))
-            except ValueError as verr:
-                log.error(verr)
-                log.error('Did not read that properly:')
-                log.error(line)
-                log.error('Please report the above error: {port} does not seem a valid port value!'.format(port=port))
-            _SERVICES[srv_name]['protocol'].append(protocol)
-    return _SERVICES
+
+    pillar_services = _get_pillar_cfg('services',
+                                      pillarenv=pillarenv,
+                                      saltenv=saltenv)
+
+    if pillar_services:
+        # inject pillar values directly
+        _SERVICES.update(pillar_services)
+        return _SERVICES
+    else:
+        # Build a map of services based on the IANA assignment list:
+        # http://www.iana.org/assignments/port-numbers
+        # It will load the /etc/services file and will build the mapping on the fly,
+        # similar to the Capirca's SERVICES file:
+        # https://github.com/google/capirca/blob/master/def/SERVICES.svc
+        # As this module is be available on Unix systems only,
+        # we'll read the services from /etc/services.
+        # In the worst case, the user will not be able to specify the
+        # services shortcut and they will need to specify the protocol / port combination
+        # using the source_port / destination_port & protocol fields.
+        services_txt = ''
+        try:
+            with salt.utils.files.fopen('/etc/services', 'r') as srv_f:
+                services_txt = salt.utils.stringutils.to_unicode(srv_f.read())
+        except IOError as ioe:
+            log.error('Unable to read from /etc/services:')
+            log.error(ioe)
+            return _SERVICES  # no mapping possible, sorry
+            # will return the default mapping
+        service_rgx = re.compile(r'^([a-zA-Z0-9-]+)\s+(\d+)\/(tcp|udp)(.*)$')
+        for line in services_txt.splitlines():
+            service_rgx_s = service_rgx.search(line)
+            if service_rgx_s and len(service_rgx_s.groups()) == 4:
+                srv_name, port, protocol, _ = service_rgx_s.groups()
+                if srv_name not in _SERVICES:
+                    _SERVICES[srv_name] = {
+                        'port': [],
+                        'protocol': []
+                    }
+                try:
+                    _SERVICES[srv_name]['port'].append(int(port))
+                except ValueError as verr:
+                    log.error(verr)
+                    log.error('Did not read that properly:')
+                    log.error(line)
+                    log.error('Please report the above error: {port} does not seem a valid port value!'.format(port=port))
+                _SERVICES[srv_name]['protocol'].append(protocol)
+        return _SERVICES
 
 
-def _translate_port(port):
+def _translate_port(port,
+                    pillarenv=None,
+                    saltenv=None):
     '''
     Look into services and return the port value using the
     service name as lookup value.
     '''
-    services = _get_services_mapping()
+    services = _get_services_mapping(pillarenv=pillarenv,
+                                     saltenv=saltenv)
     if port in services and services[port]['port']:
         return services[port]['port'][0]
     return port
 
 
-def _make_it_list(dict_, field_name, value):
+def _make_it_list(dict_,
+                  field_name,
+                  value,
+                  pillarenv=None,
+                  saltenv=None):
     '''
     Return the object list.
     '''
@@ -306,9 +324,9 @@ def _make_it_list(dict_, field_name, value):
             # again, using the same /etc/services
             for port_start, port_end in portval:
                 if not isinstance(port_start, int):
-                    port_start = _translate_port(port_start)
+                    port_start = _translate_port(port_start, pillarenv=pillarenv, saltenv=saltenv)
                 if not isinstance(port_end, int):
-                    port_end = _translate_port(port_end)
+                    port_end = _translate_port(port_end, pillarenv=pillarenv, saltenv=saltenv)
                 translated_portval.append(
                     (port_start, port_end)
                 )
@@ -316,13 +334,15 @@ def _make_it_list(dict_, field_name, value):
         return list(set(prev_value + list(value)))
     if field_name in ('source_port', 'destination_port'):
         if not isinstance(value, int):
-            value = _translate_port(value)
+            value = _translate_port(value, pillarenv=pillarenv, saltenv=saltenv)
         return list(set(prev_value + [(value, value)]))  # a list of tuples
     # anything else will be enclosed in a list-type
     return list(set(prev_value + [value]))
 
 
-def _clean_term_opts(term_opts):
+def _clean_term_opts(term_opts,
+                     pillarenv=None,
+                     saltenv=None):
     '''
     Cleanup the term opts:
 
@@ -331,13 +351,17 @@ def _clean_term_opts(term_opts):
     - create lists for those fields requiring it
     '''
     clean_opts = {}
-    _services = _get_services_mapping()
+    _tokens = _get_pillar_cfg('networks',
+                              pillarenv=pillarenv,
+                              saltenv=saltenv)
+    _services = _get_services_mapping(pillarenv=pillarenv,
+                                      saltenv=saltenv)
     for field, value in six.iteritems(term_opts):
         # firstly we'll process special fields like source_service or destination_services
         # which will inject values directly in the source or destination port and protocol
         if field == 'source_service' and value:
             if isinstance(value, six.string_types):
-                value = _make_it_list(clean_opts, field, value)
+                value = _make_it_list(clean_opts, field, value, pillarenv=pillarenv, saltenv=saltenv)
             log.debug('Processing special source services:')
             log.debug(value)
             for service in value:
@@ -356,7 +380,7 @@ def _clean_term_opts(term_opts):
             log.debug(clean_opts.get('protocol'))
         elif field == 'destination_service' and value:
             if isinstance(value, six.string_types):
-                value = _make_it_list(clean_opts, field, value)
+                value = _make_it_list(clean_opts, field, value, pillarenv=pillarenv, saltenv=saltenv)
             log.debug('Processing special destination services:')
             log.debug(value)
             for service in value:
@@ -365,10 +389,14 @@ def _clean_term_opts(term_opts):
                     # take the port and protocol values from the global and inject in the term config
                     clean_opts['destination_port'] = _make_it_list(clean_opts,
                                                                    'destination_port',
-                                                                   _services[service]['port'])
+                                                                   _services[service]['port'],
+                                                                   pillarenv=pillarenv,
+                                                                   saltenv=saltenv)
                     clean_opts['protocol'] = _make_it_list(clean_opts,
                                                            'protocol',
-                                                           _services[service]['protocol'])
+                                                           _services[service]['protocol'],
+                                                           pillarenv=pillarenv,
+                                                           saltenv=saltenv)
             log.debug('Built source_port field, after processing special destination services:')
             log.debug(clean_opts.get('destination_service'))
             log.debug('Built protocol field, after processing special destination services:')
@@ -377,7 +405,7 @@ def _clean_term_opts(term_opts):
         elif field in _TERM_FIELDS and value and value != _TERM_FIELDS[field]:
             # if not a special field type
             if isinstance(_TERM_FIELDS[field], list):
-                value = _make_it_list(clean_opts, field, value)
+                value = _make_it_list(clean_opts, field, value, pillarenv=pillarenv, saltenv=saltenv)
             if field in _IP_FILEDS:
                 # IP-type fields need to be transformed
                 ip_values = []
@@ -386,7 +414,18 @@ def _clean_term_opts(term_opts):
                         addr = six.text_type(addr)
                         # Adding this, as ipaddress would complain about valid
                         # addresses not being valid. #pythonIsFun
-                    ip_values.append(capirca.lib.policy.nacaddr.IP(addr))
+                    try:
+                        # ip address
+                        ip_values.append(capirca.lib.policy.nacaddr.IP(addr, token=six.text_type(addr)))
+                    except ValueError:
+                        if _tokens:
+                            # name tokens
+                            token = _tokens.get(addr, 'UNKNOWN')
+                            if isinstance(token, list):
+                                for addr_item in token:
+                                    ip_values.append(capirca.lib.policy.nacaddr.IP(addr_item, token=addr))
+                            else:
+                                ip_values.append(capirca.lib.policy.nacaddr.IP(token, token=addr))
                 value = ip_values[:]
             clean_opts[field] = value
     return clean_opts
@@ -497,13 +536,17 @@ def _get_term_object(filter_name,
                                     pillarenv=pillarenv)
         log.debug('Merging with pillar data:')
         log.debug(term_opts)
-        term_opts = _clean_term_opts(term_opts)
+        term_opts = _clean_term_opts(term_opts,
+                                     pillarenv=pillarenv,
+                                     saltenv=saltenv)
         log.debug('Cleaning up pillar data:')
         log.debug(term_opts)
     log.debug('Received processing opts:')
     log.debug(term_fields)
     log.debug('Cleaning up processing opts:')
-    term_fields = _clean_term_opts(term_fields)
+    term_fields = _clean_term_opts(term_fields,
+                                   pillarenv=pillarenv,
+                                   saltenv=saltenv)
     log.debug(term_fields)
     log.debug('Final term opts:')
     term_opts.update(term_fields)
@@ -536,12 +579,15 @@ def _get_policy_object(platform,
         filter_config = filter_.values()[0]
         header = capirca.lib.policy.Header()  # same header everywhere
         target_opts = [
-            platform,
-            filter_name
+            # junipersrx is a valid module name, but not a valid target name
+            # capirca expects srx
+            platform.replace('junipersrx', 'srx'),
         ]
+        # capirca expects filter name to be a list of tokens
+        target_opts.extend(filter_name.split())
         filter_options = filter_config.pop('options', None)
         if filter_options:
-            filter_options = _make_it_list({}, filter_name, filter_options)
+            filter_options = _make_it_list({}, filter_name, filter_options, pillarenv=pillarenv, saltenv=saltenv)
             # make sure the filter options are sent as list
             target_opts.extend(filter_options)
         target = capirca.lib.policy.Target(target_opts)
@@ -870,8 +916,8 @@ def get_term_config(platform,
     }
     term[term_name].update(term_fields)
     term[term_name].update({
-        'source_service': _make_it_list({}, 'source_service', source_service),
-        'destination_service': _make_it_list({}, 'destination_service', destination_service),
+        'source_service': _make_it_list({}, 'source_service', source_service, pillarenv=pillarenv, saltenv=saltenv),
+        'destination_service': _make_it_list({}, 'destination_service', destination_service, pillarenv=pillarenv, saltenv=saltenv),
     })
     terms.append(term)
     if not filter_options:
@@ -1020,7 +1066,7 @@ def get_filter_config(platform,
     filters = []
     filters.append({
         filter_name: {
-            'options': _make_it_list({}, filter_name, filter_options),
+            'options': _make_it_list({}, filter_name, filter_options, pillarenv=pillarenv, saltenv=saltenv),
             'terms': terms
         }
     })
@@ -1189,7 +1235,7 @@ def get_policy_config(platform,
         policy_pillar_cfg = _get_pillar_cfg(pillar_key,
                                             saltenv=saltenv,
                                             pillarenv=pillarenv)
-        # now, let's merge everything witht the pillar data
+        # now, let's merge everything with the pillar data
         # again, this will not remove any extra filters/terms
         # but it will merge with the pillar data
         # if this behaviour is not wanted, the user can set `merge_pillar` as `False`
